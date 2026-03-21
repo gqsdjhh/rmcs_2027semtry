@@ -1,0 +1,9 @@
+rmcs_executor:
+  ros__parameters:
+    update_rate: 1000.0
+    components:
+      - rmcs_core::hardware::Sentry -> sentry
+
+single_cboard:
+  ros__parameters:
+    board_serial: ""
