@@ -8,6 +8,7 @@
 #include <rmcs_msgs/serial_interface.hpp>
 #include <rmcs_utility/ring_buffer.hpp>
 #include <rmcs_description/tf_description.hpp>
+#include <std_msgs/msg/int32.hpp>
 
 #include "hardware/device/bmi088.hpp"
 #include "hardware/device/can_packet.hpp"
@@ -47,6 +48,11 @@ public:
         this->register_output("/tf", tf_);
 
         this->register_output("/chassis/yaw/velocity_imu", chassis_yaw_velocity_imu_, 0);
+
+        steers_calibrate_subscription_ = create_subscription<std_msgs::msg::Int32>(
+        "/steers/calibrate", rclcpp::QoS{0}, [this](std_msgs::msg::Int32::UniquePtr&& msg) {
+            steers_calibrate_subscription_callback(std::move(msg));
+        });
 
         for (auto& motor : chassis_wheel_motors_) {
             motor.configure(
@@ -228,6 +234,21 @@ private:
         imu_.store_gyroscope_status(data.x, data.y, data.z);
     }
 
+    void steers_calibrate_subscription_callback(std_msgs::msg::Int32::UniquePtr) {
+        RCLCPP_INFO(
+            get_logger(), "[steer calibration] New left front offset: %d",
+            this->chassis_steer_motors_[0].calibrate_zero_point());
+        RCLCPP_INFO(
+            get_logger(), "[steer calibration] New left back offset: %d",
+            this->chassis_steer_motors_[1].calibrate_zero_point());
+        RCLCPP_INFO(
+            get_logger(), "[steer calibration] New right back offset: %d",
+            this->chassis_steer_motors_[2].calibrate_zero_point());
+        RCLCPP_INFO(
+            get_logger(), "[steer calibration] New right front offset: %d",
+            this->chassis_steer_motors_[3].calibrate_zero_point());
+    }
+
 private:
     class CommandComponent : public rmcs_executor::Component {
     public:
@@ -256,6 +277,8 @@ private:
     device::Bmi088 imu_;
     OutputInterface<rmcs_description::Tf> tf_;
     OutputInterface<double> chassis_yaw_velocity_imu_;
+
+    rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr steers_calibrate_subscription_;
 };
 
 } // namespace rmcs_core::hardware
