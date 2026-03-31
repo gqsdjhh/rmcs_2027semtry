@@ -14,10 +14,10 @@ rmcs_executor:
 sentry:
   ros__parameters:
     board_serial: "d4-041d"
-    left_front_zero_point: 5828
-    left_back_zero_point: 5115
-    right_back_zero_point: 2677
-    right_front_zero_point: 6422
+    left_front_zero_point: 2676
+    left_back_zero_point: 6409
+    right_back_zero_point: 5778
+    right_front_zero_point: 5100
 
 steering_wheel_controller:
   ros__parameters:
