@@ -1,0 +1,16 @@
+rmcs_executor:
+  ros__parameters:
+    update_rate: 1000.0
+    components:
+      - rmcs_core::hardware::TfTest -> tf_test_hardware
+      - rmcs_core::broadcaster::TfBroadcaster -> tf_broadcaster
+      - rmcs_core::broadcaster::ValueBroadcaster -> value_broadcaster
+
+tf_test_hardware:
+  ros__parameters:
+    yaw_rate: 0.5
+    pitch_amplitude: 0.25
+    pitch_frequency: 0.2
+    camera_x: 0.06603
+    camera_y: 0.0
+    camera_z: 0.082

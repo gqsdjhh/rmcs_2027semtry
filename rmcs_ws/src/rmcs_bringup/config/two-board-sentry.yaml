@@ -13,8 +13,8 @@ rmcs_executor:
 
 two_board_sentry:
   ros__parameters:
-    board_serial_top_board: "(TODO)"
-    board_serial_bottom_board: "(TODO)"
+    board_serial_top_board: "d4-2184"
+    board_serial_bottom_board: "d4-041d"
     left_front_zero_point: 2676
     left_back_zero_point: 6409
     right_back_zero_point: 5778

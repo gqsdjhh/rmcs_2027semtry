@@ -13,16 +13,17 @@
 #include "hardware/device/bmi088.hpp"
 #include "hardware/device/can_packet.hpp"
 #include "hardware/device/dji_motor.hpp"
+#include "hardware/device/lk_motor.hpp"
 #include "hardware/device/dr16.hpp"
 #include "hardware/device/supercap.hpp"
 
 namespace rmcs_core::hardware {
 
-class TwoBoardSentry
+class YawGimbalSentry
     : public rmcs_executor::Component
     , public rclcpp::Node {
 public:
-    TwoBoardSentry()
+    YawGimbalSentry()
         : Node(
               get_component_name(),
               rclcpp::NodeOptions{}.automatically_declare_parameters_from_overrides(true))
@@ -30,6 +31,11 @@ public:
               create_partner_component<SentryCommand>(get_component_name() + "_command", *this)) {
 
         register_output("/tf", tf_);
+
+        gimbal_calibrate_subscription_ = create_subscription<std_msgs::msg::Int32>(
+            "/gimbal/calibrate", rclcpp::QoS{0}, [this](std_msgs::msg::Int32::UniquePtr&& msg) {
+                gimbal_calibrate_subscription_callback(std::move(msg));
+        });
 
         steers_calibrate_subscription_ = create_subscription<std_msgs::msg::Int32>(
         "/steers/calibrate", rclcpp::QoS{0}, [this](std_msgs::msg::Int32::UniquePtr&& msg) {
@@ -46,12 +52,12 @@ public:
             Eigen::Translation3d{0.06603, 0.0, 0.082});
         }
 
-    TwoBoardSentry(const TwoBoardSentry&) = delete;
-    TwoBoardSentry& operator=(const TwoBoardSentry&) = delete;
-    TwoBoardSentry(TwoBoardSentry&&) = delete;
-    TwoBoardSentry& operator=(TwoBoardSentry&&) = delete;
+    YawGimbalSentry(const YawGimbalSentry&) = delete;
+    YawGimbalSentry& operator=(const YawGimbalSentry&) = delete;
+    YawGimbalSentry(YawGimbalSentry&&) = delete;
+    YawGimbalSentry& operator=(YawGimbalSentry&&) = delete;
 
-    ~TwoBoardSentry() override = default;
+    ~YawGimbalSentry() override = default;
 
     void update() override {
         top_board_->update();
@@ -64,6 +70,19 @@ public:
     }
 
 private:
+
+    void gimbal_calibrate_subscription_callback(std_msgs::msg::Int32::UniquePtr) {
+        RCLCPP_INFO(
+            get_logger(), "[gimbal calibration] New yaw offset: %ld",
+            bottom_board_->gimbal_bottom_yaw_motor_.calibrate_zero_point());
+        RCLCPP_INFO(
+            get_logger(), "[gimbal calibration] New top yaw offset: %ld",
+            top_board_->gimbal_top_yaw_motor_.calibrate_zero_point());
+        RCLCPP_INFO(
+            get_logger(), "[gimbal calibration] New pitch offset: %ld",
+            top_board_->gimbal_pitch_motor_.calibrate_zero_point());
+    }
+
     void steers_calibrate_subscription_callback(std_msgs::msg::Int32::UniquePtr) {
         RCLCPP_INFO(
             get_logger(), "[steer calibration] New left front offset: %d",
@@ -81,26 +100,55 @@ private:
 
     class SentryCommand : public rmcs_executor::Component {
     public:
-        explicit SentryCommand(TwoBoardSentry& sentry)
+        explicit SentryCommand(YawGimbalSentry& sentry)
             : sentry(sentry) {}
 
         void update() override { sentry.command_update(); }
 
-        TwoBoardSentry& sentry;
+        YawGimbalSentry& sentry;
     };
 
     class TopBoard final : private librmcs::agent::CBoard {
     public:
 
-        friend class TwoBoardSentry;
+        friend class YawGimbalSentry;
         explicit TopBoard(
-            TwoBoardSentry& sentry, SentryCommand& sentry_command,
-            std::string_view board_serial = {})
+            YawGimbalSentry& sentry, SentryCommand& sentry_command
+            , std::string_view board_serial = {})
             : librmcs::agent::CBoard(board_serial)
             , tf_(sentry.tf_)
-            , bmi088_(1000, 0.2, 0.0) {
+            , bmi088_(1000, 0.2, 0.0) 
+            , gimbal_pitch_motor_(sentry, sentry_command, "/gimbal/pitch")
+            , gimbal_top_yaw_motor_(sentry, sentry_command, "/gimbal/top_yaw")
+            , gimbal_bullet_feeder_(sentry, sentry_command, "/gimbal/bullet_feeder")
+            , gimbal_left_friction_(sentry, sentry_command, "/gimbal/left_friction")
+            , gimbal_right_friction_(sentry, sentry_command, "/gimbal/right_friction") {
 
-            bmi088_.set_coordinate_mapping([](double x, double y, double z) {
+                gimbal_pitch_motor_.configure(
+                    device::LkMotor::Config{device::LkMotor::Type::kMG4010Ei10}.set_encoder_zero_point(
+                        static_cast<int>(sentry.get_parameter("pitch_motor_zero_point").as_int())));
+
+                gimbal_top_yaw_motor_.configure(
+                    device::LkMotor::Config{device::LkMotor::Type::kMG4010Ei10}.set_encoder_zero_point(
+                        static_cast<int>(sentry.get_parameter("top_yaw_motor_zero_point").as_int())));
+
+                gimbal_bullet_feeder_.configure(
+                    device::DjiMotor::Config{device::DjiMotor::Type::kM3508}
+                        .enable_multi_turn_angle()
+                        .set_reversed()
+                        .set_reduction_ratio(19 * 2));
+
+                gimbal_left_friction_.configure(
+                    device::DjiMotor::Config{device::DjiMotor::Type::kM3508}.set_reduction_ratio(1.));
+                gimbal_right_friction_.configure(
+                    device::DjiMotor::Config{device::DjiMotor::Type::kM3508}
+                        .set_reduction_ratio(1.)
+                        .set_reversed());
+
+                sentry.register_output("/gimbal/yaw/velocity_imu", gimbal_yaw_velocity_bmi088_);
+                sentry.register_output("/gimbal/pitch/velocity_imu", gimbal_pitch_velocity_bmi088_);
+
+                bmi088_.set_coordinate_mapping([](double x, double y, double z) {
                 // Get the mapping with the following code.
                 // The rotation angle must be an exact multiple of 90 degrees, otherwise
                 // use a matrix.
@@ -122,15 +170,29 @@ private:
         ~TopBoard() override = default;
 
         void update() {
+            gimbal_top_yaw_motor_.update_status();
+            gimbal_pitch_motor_.update_status();
+
+            const auto pitch_angle = std::remainder(gimbal_pitch_motor_.angle(), 2.0 * std::numbers::pi_v<double>);
+
             bmi088_.update_status();
             const Eigen::Quaterniond gimbal_bmi088_pose{
                 bmi088_.q0(), bmi088_.q1(), bmi088_.q2(), bmi088_.q3()};
-            //因为tf_description修改为双yaw原先代码会报错
-            // tf_->set_transform<rmcs_description::PitchLink, rmcs_description::OdomImu>(
-            //     gimbal_bmi088_pose.conjugate());
 
-            // tf_->set_state<rmcs_description::YawLink, rmcs_description::PitchLink>(
-                // gimbal_pitch_motor_.angle());
+            tf_->set_transform<rmcs_description::BottomYawLink, rmcs_description::OdomImu>(
+                gimbal_bmi088_pose.conjugate());
+
+            *gimbal_yaw_velocity_bmi088_ = bmi088_.gz();
+            *gimbal_pitch_velocity_bmi088_ = bmi088_.gy();
+
+            // gimbal_bullet_feeder_.update_status();
+            // gimbal_left_friction_.update_status();
+            // gimbal_right_friction_.update_status();
+
+            // std::cerr << "top_yaw: " << gimbal_top_yaw_motor_.angle() << '\n';
+            tf_->set_state<rmcs_description::BottomYawLink, rmcs_description::TopYawLink>(
+                gimbal_top_yaw_motor_.angle());
+            tf_->set_state<rmcs_description::TopYawLink, rmcs_description::PitchLink>(pitch_angle);
         }
 
         void command_update() {
@@ -140,42 +202,49 @@ private:
             //     .can_id = 0x200,
             //     .can_data =
             //         device::CanPacket8{
-            //                            device::CanPacket8::PaddingQuarter{},
-            //                            device::CanPacket8::PaddingQuarter{},
-            //                            gimbal_left_friction_.generate_command(),
-            //                            gimbal_right_friction_.generate_command(),
-            //                            }
+            //             gimbal_right_friction_.generate_command(),
+            //             gimbal_left_friction_.generate_command(),
+            //             device::CanPacket8::PaddingQuarter{},
+            //             gimbal_bullet_feeder_.generate_command(),
+            //         }
             //             .as_bytes(),
             // });
 
+            // builder.can1_transmit({
+            //     .can_id = 0x141,
+            //     .can_data = gimbal_top_yaw_motor_.generate_torque_command().as_bytes(),
+            // });
+
             // builder.can2_transmit({
-            //     .can_id = 0x142,
-            //     .can_data = gimbal_pitch_motor_
-            //                     .generate_velocity_command(gimbal_pitch_motor_.control_velocity())
-            //                     .as_bytes(),
+            //     .can_id = 0x141,
+            //     .can_data = gimbal_pitch_motor_.generate_torque_command().as_bytes(),
             // });
         }
 
     private:
 
-        // void can1_receive_callback(const librmcs::data::CanDataView& data) override {
-        //     if (data.is_extended_can_id || data.is_remote_transmission) [[unlikely]]
-        //         return;
-        //     auto can_id = data.can_id;
-        //     if (can_id == 0x203) {
-        //         gimbal_left_friction_.store_status(data.can_data);
-        //     } else if (can_id == 0x204) {
-        //         gimbal_right_friction_.store_status(data.can_data);
-        //     }
-        // }
+        void can1_receive_callback(const librmcs::data::CanDataView& data) override {
+            if (data.is_extended_can_id || data.is_remote_transmission) [[unlikely]]
+                return;
+            auto can_id = data.can_id;
+            if (can_id == 0x202) {
+                gimbal_left_friction_.store_status(data.can_data);
+            } else if (can_id == 0x201) {
+                gimbal_right_friction_.store_status(data.can_data);
+            } else if (can_id == 0x204) {
+                gimbal_bullet_feeder_.store_status(data.can_data);
+            } else if (can_id == 0x141) {
+                gimbal_top_yaw_motor_.store_status(data.can_data);
+            }
+        }
 
-        // void can2_receive_callback(const librmcs::data::CanDataView& data) override {
-        //     if (data.is_extended_can_id || data.is_remote_transmission) [[unlikely]]
-        //         return;
-        //     auto can_id = data.can_id;
-        //     if (can_id == 0x142)
-        //         gimbal_pitch_motor_.store_status(data.can_data);
-        // }
+        void can2_receive_callback(const librmcs::data::CanDataView& data) override {
+            if (data.is_extended_can_id || data.is_remote_transmission) [[unlikely]]
+                return;
+            auto can_id = data.can_id;
+            if (can_id == 0x141)
+                gimbal_pitch_motor_.store_status(data.can_data);
+        }
 
         void accelerometer_receive_callback(
             const librmcs::data::AccelerometerDataView& data) override {
@@ -190,24 +259,28 @@ private:
 
         OutputInterface<double> gimbal_yaw_velocity_bmi088_;
         OutputInterface<double> gimbal_pitch_velocity_bmi088_;
-
         device::Bmi088 bmi088_;
+
+        device::LkMotor gimbal_pitch_motor_;
+        device::LkMotor gimbal_top_yaw_motor_;
+        device::DjiMotor gimbal_bullet_feeder_;
+
+        device::DjiMotor gimbal_left_friction_;
+        device::DjiMotor gimbal_right_friction_;
     };
 
     class BottomBoard final : private librmcs::agent::CBoard {
     public:
-        friend class TwoBoardSentry;
+        friend class YawGimbalSentry;
 
         explicit BottomBoard(
-            TwoBoardSentry& sentry, SentryCommand& sentry_command,
+            YawGimbalSentry& sentry, SentryCommand& sentry_command,
             std::string_view board_serial = {})
             : librmcs::agent::CBoard(board_serial)
             , imu_(1000, 0.2, 0.0)
             , tf_(sentry.tf_)
             , dr16_(sentry)
-            // , gimbal_yaw_motor_(steering_infantry, steering_infantry_command, "/gimbal/yaw")
-            // , gimbal_bullet_feeder_(
-            //       steering_infantry, steering_infantry_command, "/gimbal/bullet_feeder")
+            , gimbal_bottom_yaw_motor_(sentry, sentry_command, "/gimbal/bottom_yaw")
             , chassis_wheel_motors_(
                   {sentry, sentry_command, "/chassis/left_front_wheel"},
                   {sentry, sentry_command, "/chassis/left_back_wheel"},
@@ -232,6 +305,13 @@ private:
                 });
                 return size;
             };
+
+            gimbal_bottom_yaw_motor_.configure(
+                device::LkMotor::Config{device::LkMotor::Type::kMG6012Ei8}
+                    .set_reversed()
+                    .set_encoder_zero_point(
+                        static_cast<int>(
+                            sentry.get_parameter("bottom_yaw_motor_zero_point").as_int())));
 
             for (auto& motor : chassis_wheel_motors_)
                 motor.configure(
@@ -288,20 +368,18 @@ private:
                 motor.update_status();
 
             dr16_.update_status();
-            // gimbal_yaw_motor_.update_status();
-            // tf_->set_state<rmcs_description::GimbalCenterLink, rmcs_description::YawLink>(
-            //     gimbal_yaw_motor_.angle());
-
-            // gimbal_bullet_feeder_.update_status();
+            gimbal_bottom_yaw_motor_.update_status();
+            tf_->set_state<rmcs_description::GimbalCenterLink, rmcs_description::YawLink>(
+                gimbal_bottom_yaw_motor_.angle());
         }
 
         void command_update() {
 
             auto builder = start_transmit();
-            // builder.can1_transmit({
-            //     .can_id = 0x141,
-            //     .can_data = gimbal_bottom_yaw_motor_.generate_command().as_bytes(),
-            // });
+            builder.can1_transmit({
+                .can_id = 0x141,
+                .can_data = gimbal_bottom_yaw_motor_.generate_command().as_bytes(),
+            });
 
             if (can_transmission_mode_) {
                 builder
@@ -374,8 +452,8 @@ private:
                 chassis_steer_motors_[1].store_status(data.can_data);
             else if (can_id == 0x206)
                 chassis_steer_motors_[0].store_status(data.can_data);
-            // else if (can_id == 0x141)
-            //     gimbal_bottom_yaw_motor_.store_status(data.can_data);
+            else if (can_id == 0x141)
+                gimbal_bottom_yaw_motor_.store_status(data.can_data);
         }
 
         void can2_receive_callback(const librmcs::data::CanDataView& data) override {
@@ -417,8 +495,8 @@ private:
         OutputInterface<double> powermeter_charge_power_limit_;
 
         device::Dr16 dr16_;
-        // device::LkMotor gimbal_yaw_motor_;
-        // device::DjiMotor gimbal_bullet_feeder_;
+        device::LkMotor gimbal_bottom_yaw_motor_;
+
         device::DjiMotor chassis_wheel_motors_[4];
         device::DjiMotor chassis_steer_motors_[4];
         device::Supercap supercap_;
@@ -437,6 +515,7 @@ private:
     std::shared_ptr<TopBoard> top_board_;
     std::shared_ptr<BottomBoard> bottom_board_;
 
+    rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr gimbal_calibrate_subscription_;
     rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr steers_calibrate_subscription_;
 };
 
@@ -445,4 +524,4 @@ private:
 #include <pluginlib/class_list_macros.hpp>
 
 PLUGINLIB_EXPORT_CLASS(
-    rmcs_core::hardware::TwoBoardSentry, rmcs_executor::Component)
+    rmcs_core::hardware::YawGimbalSentry, rmcs_executor::Component)

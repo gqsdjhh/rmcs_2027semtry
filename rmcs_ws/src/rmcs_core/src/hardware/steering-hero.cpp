@@ -207,8 +207,9 @@ private:
             imu_.update_status();
             const Eigen::Quaterniond gimbal_imu_pose{imu_.q0(), imu_.q1(), imu_.q2(), imu_.q3()};
 
-            tf_->set_transform<rmcs_description::PitchLink, rmcs_description::OdomImu>(
-                gimbal_imu_pose.conjugate());
+            //因为tf_description修改为双yaw原先代码会报错
+            // tf_->set_transform<rmcs_description::PitchLink, rmcs_description::OdomImu>(
+            //     gimbal_imu_pose.conjugate());
 
             benewake_.update_status();
 
@@ -218,8 +219,9 @@ private:
             gimbal_top_yaw_motor_.update_status();
 
             gimbal_pitch_motor_.update_status();
-            tf_->set_state<rmcs_description::YawLink, rmcs_description::PitchLink>(
-                gimbal_pitch_motor_.angle());
+            //因为tf_description修改为双yaw原先代码会报错
+            // tf_->set_state<rmcs_description::YawLink, rmcs_description::PitchLink>(
+            //     gimbal_pitch_motor_.angle());
 
             gimbal_player_viewer_motor_.update_status();
             tf_->set_state<rmcs_description::PitchLink, rmcs_description::ViewerLink>(

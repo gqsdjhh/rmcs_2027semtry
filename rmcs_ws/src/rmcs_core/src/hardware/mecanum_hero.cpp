@@ -187,9 +187,9 @@ private:
                 imu_.q2() = gimbal_imu_pose.y();
                 imu_.q3() = gimbal_imu_pose.z();
             }
-
-            tf_->set_transform<rmcs_description::PitchLink, rmcs_description::OdomImu>(
-                gimbal_imu_pose.conjugate());
+            //因为tf_description修改为双yaw原先代码会报错
+            // tf_->set_transform<rmcs_description::PitchLink, rmcs_description::OdomImu>(
+            //     gimbal_imu_pose.conjugate());
 
             gy614_.update_status();
             benewake_.update_status();
@@ -198,8 +198,9 @@ private:
             *gimbal_pitch_velocity_imu_ = imu_.gy();
 
             gimbal_pitch_motor_.update_status();
-            tf_->set_state<rmcs_description::YawLink, rmcs_description::PitchLink>(
-                gimbal_pitch_motor_.angle());
+            //因为tf_description修改为双yaw原先代码会报错
+            // tf_->set_state<rmcs_description::YawLink, rmcs_description::PitchLink>(
+            //     gimbal_pitch_motor_.angle());
 
             for (auto& motor : gimbal_friction_wheels_)
                 motor.update_status();

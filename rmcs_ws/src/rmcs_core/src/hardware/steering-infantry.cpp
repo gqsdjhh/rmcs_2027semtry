@@ -171,8 +171,9 @@ private:
             const Eigen::Quaterniond gimbal_bmi088_pose{
                 bmi088_.q0(), bmi088_.q1(), bmi088_.q2(), bmi088_.q3()};
 
-            tf_->set_transform<rmcs_description::PitchLink, rmcs_description::OdomImu>(
-                gimbal_bmi088_pose.conjugate());
+            //因为tf_description修改为双yaw原先代码会报错
+            // tf_->set_transform<rmcs_description::PitchLink, rmcs_description::OdomImu>(
+            //     gimbal_bmi088_pose.conjugate());
 
             *gimbal_yaw_velocity_bmi088_ = bmi088_.gz();
             *gimbal_pitch_velocity_bmi088_ = bmi088_.gy();
@@ -181,8 +182,8 @@ private:
             gimbal_left_friction_.update_status();
             gimbal_right_friction_.update_status();
 
-            tf_->set_state<rmcs_description::YawLink, rmcs_description::PitchLink>(
-                gimbal_pitch_motor_.angle());
+            // tf_->set_state<rmcs_description::YawLink, rmcs_description::PitchLink>(
+            //     gimbal_pitch_motor_.angle());
         }
 
         void command_update() {
