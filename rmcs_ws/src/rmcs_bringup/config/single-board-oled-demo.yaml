@@ -1,0 +1,12 @@
+rmcs_executor:
+  ros__parameters:
+    update_rate: 100.0
+    components:
+      - rmcs_core::hardware::SingleBoardOledDemo -> oled_demo_hardware
+
+oled_demo_hardware:
+  ros__parameters:
+    board_serial: "(TODO)"
+    display_message: |
+      RMCS OLED Demo
+      Set /oled/text to override.
