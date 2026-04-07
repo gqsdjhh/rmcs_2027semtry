@@ -1,0 +1,34 @@
+rmcs_executor:
+  ros__parameters:
+    update_rate: 1000.0
+    components:
+      - rmcs_core::hardware::Sentry -> sentry
+
+      - rmcs_core::referee::Status -> referee_status
+      - rmcs_core::referee::Command -> referee_command
+
+      - rmcs_core::controller::chassis::ChassisController -> chassis_controller
+      - rmcs_core::controller::chassis::ChassisPowerController -> chassis_power_controller
+      - rmcs_core::controller::chassis::SteeringWheelController -> steering_wheel_controller
+
+sentry:
+  ros__parameters:
+    board_serial: "d4-041d"
+    left_front_zero_point: 5828
+    left_back_zero_point: 5115
+    right_back_zero_point: 2677
+    right_front_zero_point: 6422
+
+steering_wheel_controller:
+  ros__parameters:
+    mess: 22.0
+    moment_of_inertia: 0.77852676
+    vehicle_radius: 0.26870058
+    wheel_radius: 0.055
+    friction_coefficient: 0.5
+    k1: 2.958580e+00
+    k2: 3.082190e-03
+    no_load_power: 11.37
+    chassis_translation_kp: 8.0
+    chassis_translation_ki: 0.0
+    chassis_translation_kd: 0.0
