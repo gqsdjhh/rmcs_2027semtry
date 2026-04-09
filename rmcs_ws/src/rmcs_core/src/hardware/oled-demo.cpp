@@ -1,4 +1,5 @@
-#include <algorithm>
+#include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <span>
@@ -12,28 +13,28 @@
 #include <rmcs_utility/tick_timer.hpp>
 
 #include "hardware/device/oled.hpp"
+#include "hardware/device/oled_i2c.hpp"
 
 namespace rmcs_core::hardware {
 
-class SingleBoardOledDemo
+class OledDemo
     : public rmcs_executor::Component
     , public rclcpp::Node
     , private librmcs::agent::CBoard {
 public:
-    SingleBoardOledDemo()
+    OledDemo()
         : Node(
               get_component_name(),
               rclcpp::NodeOptions{}.automatically_declare_parameters_from_overrides(true))
         , librmcs::agent::CBoard{get_parameter("board_serial").as_string()}
         , command_component_(
               create_partner_component<CommandComponent>(get_component_name() + "_command", *this))
+        , oled_i2c_([this](std::uint8_t slave_address, std::span<const std::byte> payload) {
+            write_i2c0(slave_address, payload);
+        })
         , oled_(
               *command_component_, "/oled",
-              {
-                  .write_command = [this](std::uint8_t command) { write_oled_command(command); },
-                  .write_data =
-                      [this](std::span<const std::uint8_t> data) { write_oled_data(data); },
-              }) {
+              oled_i2c_.backend()) {
         register_output("/demo/oled/update_count", update_count_, std::uint64_t{0});
         register_output("/demo/oled/command_count", command_count_, std::uint64_t{0});
         register_output("/demo/oled/initialized", initialized_output_, false);
@@ -41,20 +42,35 @@ public:
 
         if (!has_parameter("display_message"))
             declare_parameter<std::string>("display_message", "RMCS OLED demo");
+        if (!has_parameter("oled_i2c_address"))
+            declare_parameter<int64_t>("oled_i2c_address", device::OledConfig{}.i2c_address);
         if (!has_parameter("scene_period"))
             declare_parameter<int64_t>("scene_period", 150);
+
+        auto oled_config = oled_.config();
+        const auto configured_i2c_address = get_parameter("oled_i2c_address").as_int();
+        if (configured_i2c_address < 0 || configured_i2c_address > 0x7F) {
+            RCLCPP_WARN(
+                get_logger(),
+                "Invalid OLED I2C address %ld. Falling back to 0x%02X.",
+                configured_i2c_address, static_cast<unsigned int>(oled_config.i2c_address));
+        } else {
+            oled_config.i2c_address = static_cast<std::uint8_t>(configured_i2c_address);
+        }
+        oled_i2c_.set_i2c_address(oled_config.i2c_address);
+        oled_.set_config(oled_config);
 
         scene_period_ =
             static_cast<unsigned int>(std::max<int64_t>(1, get_parameter("scene_period").as_int()));
         scene_timer_.reset(scene_period_);
     }
 
-    SingleBoardOledDemo(const SingleBoardOledDemo&) = delete;
-    SingleBoardOledDemo& operator=(const SingleBoardOledDemo&) = delete;
-    SingleBoardOledDemo(SingleBoardOledDemo&&) = delete;
-    SingleBoardOledDemo& operator=(SingleBoardOledDemo&&) = delete;
+    OledDemo(const OledDemo&) = delete;
+    OledDemo& operator=(const OledDemo&) = delete;
+    OledDemo(OledDemo&&) = delete;
+    OledDemo& operator=(OledDemo&&) = delete;
 
-    ~SingleBoardOledDemo() override = default;
+    ~OledDemo() override = default;
 
     void update() override { ++(*update_count_); }
 
@@ -73,7 +89,8 @@ public:
         ++scene_tick_;
         *scene_index_output_ = static_cast<std::uint8_t>(current_scene_);
 
-        initialized_ = render_scene(current_scene_);
+        initialized_ =
+            render_scene(current_scene_) && !i2c_error_seen_.load(std::memory_order_acquire);
         *initialized_output_ = initialized_;
         scene_entered_ = false;
     }
@@ -93,13 +110,13 @@ private:
 
     class CommandComponent : public rmcs_executor::Component {
     public:
-        explicit CommandComponent(SingleBoardOledDemo& demo)
+        explicit CommandComponent(OledDemo& demo)
             : demo_(demo) {}
 
         void update() override { demo_.command_update(); }
 
     private:
-        SingleBoardOledDemo& demo_;
+        OledDemo& demo_;
     };
 
     bool render_scene(DemoScene scene) {
@@ -191,19 +208,27 @@ private:
         return success;
     }
 
-    void write_oled_command(std::uint8_t command) {
-        // 等待 i2c 适配即可
-        (void)command;
+    void write_i2c0(std::uint8_t slave_address, std::span<const std::byte> payload) {
+        if (payload.empty())
+            return;
+        start_transmit().i2c0_write({
+            .slave_address = slave_address,
+            .payload = payload,
+        });
     }
 
-    void write_oled_data(std::span<const std::uint8_t> data) {
-        // 等待 i2c 适配即可
-        (void)data;
+    void i2c0_error_callback(std::uint8_t slave_address) override {
+        i2c_error_seen_.store(true, std::memory_order_release);
+        RCLCPP_WARN(
+            get_logger(), "OLED I2C0 write failed for slave address 0x%02X.",
+            static_cast<unsigned int>(slave_address));
     }
 
     std::shared_ptr<CommandComponent> command_component_;
+    device::OledI2c oled_i2c_;
     device::Oled oled_;
 
+    std::atomic_bool i2c_error_seen_ = false;
     bool initialized_ = false;
     bool scene_entered_ = true;
     unsigned int scene_period_ = 150;
@@ -221,4 +246,4 @@ private:
 
 #include <pluginlib/class_list_macros.hpp>
 
-PLUGINLIB_EXPORT_CLASS(rmcs_core::hardware::SingleBoardOledDemo, rmcs_executor::Component)
+PLUGINLIB_EXPORT_CLASS(rmcs_core::hardware::OledDemo, rmcs_executor::Component)

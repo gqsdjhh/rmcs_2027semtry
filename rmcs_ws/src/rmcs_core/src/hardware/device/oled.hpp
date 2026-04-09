@@ -93,12 +93,9 @@ public:
         if (width == 0 || height == 0)
             return true;
 
-        std::int16_t page_begin = y / 8;
-        std::int16_t page_end = (y + height - 1) / 8 + 1;
-        if (y < 0) {
-            --page_begin;
-            --page_end;
-        }
+        const auto page_begin = page_for_y(y);
+        const auto page_end = static_cast<std::int16_t>(
+            page_for_y(static_cast<std::int32_t>(y) + height - 1) + 1);
 
         const std::int16_t start_x = std::clamp<std::int16_t>(x, 0, kWidth);
         const std::int16_t end_x = std::clamp<std::int16_t>(x + width, 0, kWidth);
@@ -308,6 +305,13 @@ private:
         }
 
         return static_cast<std::uint8_t>(std::min<std::uint16_t>(width, kWidth));
+    }
+
+    static std::int16_t page_for_y(std::int32_t y) {
+        auto page = static_cast<std::int16_t>(y / 8);
+        if (y < 0 && y % 8 != 0)
+            --page;
+        return page;
     }
 
     void set_cursor(std::uint8_t page, std::uint8_t x) {
