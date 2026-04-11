@@ -6,7 +6,9 @@ rmcs_executor:
 
 oled_demo_hardware:
   ros__parameters:
-    board_serial: "(TODO)"
+    board_serial: "d4e779"
+    skip_version_checks: true
+    oled_refresh_period: 20
     oled_i2c_address: 60
     display_message: |
       RMCS OLED Demo

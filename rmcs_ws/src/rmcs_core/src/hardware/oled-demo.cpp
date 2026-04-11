@@ -17,6 +17,19 @@
 
 namespace rmcs_core::hardware {
 
+namespace {
+
+librmcs::agent::AdvancedOptions make_c_board_options(rclcpp::Node& node) {
+    librmcs::agent::AdvancedOptions options{};
+    if (node.has_parameter("skip_version_checks")) {
+        options.dangerously_skip_version_checks =
+            node.get_parameter("skip_version_checks").as_bool();
+    }
+    return options;
+}
+
+} // namespace
+
 class OledDemo
     : public rmcs_executor::Component
     , public rclcpp::Node
@@ -26,7 +39,8 @@ public:
         : Node(
               get_component_name(),
               rclcpp::NodeOptions{}.automatically_declare_parameters_from_overrides(true))
-        , librmcs::agent::CBoard{get_parameter("board_serial").as_string()}
+        , librmcs::agent::CBoard{
+              get_parameter("board_serial").as_string(), make_c_board_options(*this)}
         , command_component_(
               create_partner_component<CommandComponent>(get_component_name() + "_command", *this))
         , oled_i2c_([this](std::uint8_t slave_address, std::span<const std::byte> payload) {
@@ -42,10 +56,21 @@ public:
 
         if (!has_parameter("display_message"))
             declare_parameter<std::string>("display_message", "RMCS OLED demo");
+        if (!has_parameter("skip_version_checks"))
+            declare_parameter<bool>("skip_version_checks", false);
         if (!has_parameter("oled_i2c_address"))
             declare_parameter<int64_t>("oled_i2c_address", device::OledConfig{}.i2c_address);
+        if (!has_parameter("oled_refresh_period"))
+            declare_parameter<int64_t>("oled_refresh_period", 20);
         if (!has_parameter("scene_period"))
             declare_parameter<int64_t>("scene_period", 150);
+
+        if (get_parameter("skip_version_checks").as_bool()) {
+            RCLCPP_WARN(
+                get_logger(),
+                "Skipping board firmware version checks for OledDemo. Use only for temporary "
+                "debugging.");
+        }
 
         auto oled_config = oled_.config();
         const auto configured_i2c_address = get_parameter("oled_i2c_address").as_int();
@@ -63,6 +88,8 @@ public:
         scene_period_ =
             static_cast<unsigned int>(std::max<int64_t>(1, get_parameter("scene_period").as_int()));
         scene_timer_.reset(scene_period_);
+        oled_refresh_period_ = static_cast<unsigned int>(
+            std::max<int64_t>(1, get_parameter("oled_refresh_period").as_int()));
     }
 
     OledDemo(const OledDemo&) = delete;
@@ -89,8 +116,15 @@ public:
         ++scene_tick_;
         *scene_index_output_ = static_cast<std::uint8_t>(current_scene_);
 
+        if (oled_refresh_countdown_ > 0) {
+            --oled_refresh_countdown_;
+            *initialized_output_ = initialized_;
+            return;
+        }
+
+        oled_refresh_countdown_ = oled_refresh_period_;
         initialized_ =
-            render_scene(current_scene_) && !i2c_error_seen_.load(std::memory_order_acquire);
+            render_scene_batched(current_scene_) && !i2c_error_seen_.load(std::memory_order_acquire);
         *initialized_output_ = initialized_;
         scene_entered_ = false;
     }
@@ -130,6 +164,19 @@ private:
         case DemoScene::kCount: return false;
         }
         return false;
+    }
+
+    bool render_scene_batched(DemoScene scene) {
+        auto packet_builder = start_transmit();
+        active_packet_builder_ = &packet_builder;
+
+        struct PacketBuilderGuard {
+            OledDemo& demo;
+
+            ~PacketBuilderGuard() { demo.active_packet_builder_ = nullptr; }
+        } guard{*this};
+
+        return render_scene(scene);
     }
 
     bool render_display_text_scene() {
@@ -211,10 +258,17 @@ private:
     void write_i2c0(std::uint8_t slave_address, std::span<const std::byte> payload) {
         if (payload.empty())
             return;
-        start_transmit().i2c0_write({
+
+        const librmcs::data::I2cDataView data{
             .slave_address = slave_address,
             .payload = payload,
-        });
+        };
+        if (active_packet_builder_) {
+            active_packet_builder_->i2c0_write(data);
+            return;
+        }
+
+        start_transmit().i2c0_write(data);
     }
 
     void i2c0_error_callback(std::uint8_t slave_address) override {
@@ -231,6 +285,9 @@ private:
     std::atomic_bool i2c_error_seen_ = false;
     bool initialized_ = false;
     bool scene_entered_ = true;
+    librmcs::agent::CBoard::PacketBuilder* active_packet_builder_ = nullptr;
+    unsigned int oled_refresh_period_ = 20;
+    unsigned int oled_refresh_countdown_ = 0;
     unsigned int scene_period_ = 150;
     std::uint64_t scene_tick_ = 0;
     DemoScene current_scene_ = DemoScene::kDisplayText;
