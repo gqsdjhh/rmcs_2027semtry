@@ -11,10 +11,223 @@
 #include <string_view>
 #include <utility>
 
-#include "hardware/device/oled_config.hpp"
-#include "hardware/device/oled_show.hpp"
+#include "hardware/device/oled_data.hpp"
 
 namespace rmcs_core::hardware::device {
+
+struct OledConfig {
+    static constexpr std::int16_t kSupportedWidth = 128;
+    static constexpr std::int16_t kSupportedHeight = 64;
+    static constexpr std::int16_t kSupportedPages = kSupportedHeight / 8;
+
+    enum class Controller : std::uint8_t {
+        kSsd1306,
+    };
+
+    enum class AddressingMode : std::uint8_t {
+        kHorizontal = 0x00,
+        kVertical = 0x01,
+        kPage = 0x02,
+    };
+
+    [[nodiscard]] bool uses_supported_geometry() const {
+        return width == kSupportedWidth && height == kSupportedHeight;
+    }
+
+    [[nodiscard]] bool uses_supported_transport_mode() const {
+        return controller == Controller::kSsd1306 && addressing_mode == AddressingMode::kPage;
+    }
+
+    Controller controller = Controller::kSsd1306;
+    AddressingMode addressing_mode = AddressingMode::kPage;
+
+    std::int16_t width = kSupportedWidth;
+    std::int16_t height = kSupportedHeight;
+
+    std::uint8_t display_offset = 0x00;
+    std::uint8_t start_line = 0x00;
+    std::uint8_t contrast = 0xCF;
+    std::uint8_t oscillator_frequency = 0x80;
+    std::uint8_t precharge_period = 0xF1;
+    std::uint8_t vcomh_deselect_level = 0x30;
+    std::uint8_t com_pins_hardware_config = 0x12;
+
+    bool segment_remap = true;
+    bool com_scan_reverse = true;
+    bool inverse_display = false;
+    bool entire_display_on = false;
+    bool enable_charge_pump = true;
+};
+
+class OledShow {
+public:
+    static constexpr std::int16_t kWidth = OledConfig::kSupportedWidth;
+    static constexpr std::int16_t kHeight = OledConfig::kSupportedHeight;
+    static constexpr std::int16_t kPages = OledConfig::kSupportedPages;
+
+    using DisplayBuffer = std::array<std::array<std::uint8_t, kWidth>, kPages>;
+
+    enum class FontSize : std::uint8_t {
+        k6x8 = 6,
+        k8x16 = 8,
+    };
+
+    virtual ~OledShow() = default;
+
+    static constexpr std::uint8_t line_height(FontSize font_size) {
+        return font_size == FontSize::k8x16 ? 16 : 8;
+    }
+
+    void clear() {
+        on_framebuffer_mutated();
+        for (auto& page : display_buffer_)
+            page.fill(0x00);
+    }
+
+    void show_char(std::int16_t x, std::int16_t y, char character, FontSize font_size) {
+        if (character < ' ' || character > '~')
+            character = '?';
+
+        const auto index = static_cast<std::size_t>(character - ' ');
+        if (font_size == FontSize::k8x16) {
+            blit_image(x, y, 8, 16, detail::kFont8x16[index]);
+        } else {
+            blit_image(x, y, 6, 8, detail::kFont6x8[index]);
+        }
+    }
+
+    void show_string(std::int16_t x, std::int16_t y, std::string_view string, FontSize font_size) {
+        std::uint16_t x_offset = 0;
+
+        for (std::size_t i = 0; i < string.size();) {
+            const auto char_length = utf8_char_length(static_cast<std::uint8_t>(string[i]));
+            if (char_length == 0) {
+                ++i;
+                continue;
+            }
+            if (i + char_length > string.size())
+                break;
+
+            const auto character = string.substr(i, char_length);
+            i += char_length;
+
+            if (char_length == 1) {
+                show_char(x + x_offset, y, character.front(), font_size);
+                x_offset += font_width(font_size);
+                continue;
+            }
+
+            if (font_size != FontSize::k8x16) {
+                show_char(x + x_offset, y, '?', FontSize::k6x8);
+                x_offset += font_width(FontSize::k6x8);
+                continue;
+            }
+
+            std::size_t glyph_index = 0;
+            for (; detail::kChineseFont16x16[glyph_index].index[0] != '\0'; ++glyph_index) {
+                if (character == detail::kChineseFont16x16[glyph_index].index)
+                    break;
+            }
+
+            blit_image(x + x_offset, y, 16, 16, detail::kChineseFont16x16[glyph_index].data);
+            x_offset += 16;
+        }
+    }
+
+    void show_text(std::string_view text, FontSize font_size = FontSize::k6x8) {
+        const std::int16_t line_height_value = line_height(font_size);
+        std::int16_t y = 0;
+
+        while (y < kHeight) {
+            const auto newline = text.find('\n');
+            const auto line = text.substr(0, newline);
+            show_string(0, y, line, font_size);
+
+            if (newline == std::string_view::npos)
+                break;
+
+            text.remove_prefix(newline + 1);
+            y += line_height_value;
+        }
+    }
+
+    [[nodiscard]] const DisplayBuffer& display_buffer() const { return display_buffer_; }
+
+protected:
+    [[nodiscard]] DisplayBuffer& mutable_display_buffer() { return display_buffer_; }
+
+    static std::uint8_t utf8_char_length(std::uint8_t first_byte) {
+        if ((first_byte & 0x80U) == 0x00U)
+            return 1;
+        if ((first_byte & 0xE0U) == 0xC0U)
+            return 2;
+        if ((first_byte & 0xF0U) == 0xE0U)
+            return 3;
+        if ((first_byte & 0xF8U) == 0xF0U)
+            return 4;
+        return 0;
+    }
+
+    static std::uint8_t font_width(FontSize font_size) {
+        return static_cast<std::uint8_t>(font_size);
+    }
+
+    void clear_area(std::int16_t x, std::int16_t y, std::uint8_t width, std::uint8_t height) {
+        for (std::int16_t j = y; j < y + height; ++j) {
+            for (std::int16_t i = x; i < x + width; ++i) {
+                if (i < 0 || i >= kWidth || j < 0 || j >= kHeight)
+                    continue;
+
+                display_buffer_[j / 8][i] &= static_cast<std::uint8_t>(~(0x01U << (j % 8)));
+            }
+        }
+    }
+
+    void blit_image(
+        std::int16_t x, std::int16_t y, std::uint8_t width, std::uint8_t height,
+        const std::uint8_t* image) {
+        if (width == 0 || height == 0 || image == nullptr)
+            return;
+
+        on_framebuffer_mutated();
+        clear_area(x, y, width, height);
+
+        for (std::uint8_t page_index = 0; page_index < (height - 1) / 8 + 1; ++page_index) {
+            for (std::uint8_t column = 0; column < width; ++column) {
+                if (x + column < 0 || x + column >= kWidth)
+                    continue;
+
+                auto page = static_cast<std::int16_t>(y / 8);
+                auto shift = static_cast<std::int16_t>(y % 8);
+                if (y < 0) {
+                    --page;
+                    shift += 8;
+                }
+
+                if (page + page_index >= 0 && page + page_index < kPages) {
+                    display_buffer_[page + page_index][x + column] |=
+                        static_cast<std::uint8_t>(image[page_index * width + column] << shift);
+                }
+                if (page + page_index + 1 >= 0 && page + page_index + 1 < kPages) {
+                    display_buffer_[page + page_index + 1][x + column] |= static_cast<std::uint8_t>(
+                        image[page_index * width + column] >> (8 - shift));
+                }
+            }
+        }
+    }
+
+    static std::uint32_t pow(std::uint32_t x, std::uint32_t y) {
+        std::uint32_t result = 1;
+        while (y-- != 0)
+            result *= x;
+        return result;
+    }
+
+    virtual void on_framebuffer_mutated() {}
+
+private:
+    DisplayBuffer display_buffer_{};
+};
 
 class Oled : public OledShow {
 public:
@@ -54,7 +267,10 @@ public:
         return static_cast<bool>(backend_.write_commands) && static_cast<bool>(backend_.write_data);
     }
 
-    bool initialize() {
+    bool initialize_without_flush() {
+        if (initialized_)
+            return true;
+
         clear();
         if (!has_backend() || !config_.uses_supported_geometry()
             || !config_.uses_supported_transport_mode())
@@ -62,16 +278,32 @@ public:
 
         const auto init_sequence = build_init_sequence();
         write_commands(init_sequence);
+        initialized_ = true;
+        return true;
+    }
+
+    bool initialize() {
+        if (!initialize_without_flush())
+            return false;
 
         return flush();
     }
 
     bool flush() {
+        return flush_pages(0, static_cast<std::uint8_t>(kPages));
+    }
+
+    bool flush_pages(std::uint8_t page_begin, std::uint8_t page_end) {
         if (!has_backend())
             return false;
 
+        page_begin = std::min<std::uint8_t>(page_begin, static_cast<std::uint8_t>(kPages));
+        page_end = std::min<std::uint8_t>(page_end, static_cast<std::uint8_t>(kPages));
+        if (page_begin >= page_end)
+            return true;
+
         const auto& current = display_buffer();
-        for (std::uint8_t page = 0; page < current.size(); ++page) {
+        for (std::uint8_t page = page_begin; page < page_end; ++page) {
             set_cursor(page, 0);
             write_data({current[page].data(), current[page].size()});
         }

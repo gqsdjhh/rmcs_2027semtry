@@ -1,5 +1,4 @@
 #include <algorithm>
-#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -11,8 +10,7 @@
 #include <rclcpp/node_options.hpp>
 #include <rmcs_executor/component.hpp>
 
-#include "hardware/device/oled.hpp"
-#include "hardware/device/oled_i2c.hpp"
+#include "hardware/device/oled_runtime.hpp"
 
 namespace rmcs_core::hardware {
 
@@ -21,7 +19,7 @@ namespace {
 std::uint8_t make_oled_i2c_address(rclcpp::Node& node) {
     if (!node.has_parameter("oled_i2c_address")) {
         node.declare_parameter<int64_t>(
-            "oled_i2c_address", device::OledI2c::kDefaultI2cAddress);
+            "oled_i2c_address", device::OledRuntime::kDefaultI2cAddress);
     }
 
     const auto configured_i2c_address = node.get_parameter("oled_i2c_address").as_int();
@@ -29,8 +27,8 @@ std::uint8_t make_oled_i2c_address(rclcpp::Node& node) {
         RCLCPP_WARN(
             node.get_logger(), "Invalid OLED I2C address %ld. Falling back to 0x%02X.",
             configured_i2c_address,
-            static_cast<unsigned int>(device::OledI2c::kDefaultI2cAddress));
-        return device::OledI2c::kDefaultI2cAddress;
+            static_cast<unsigned int>(device::OledRuntime::kDefaultI2cAddress));
+        return device::OledRuntime::kDefaultI2cAddress;
     }
 
     return static_cast<std::uint8_t>(configured_i2c_address);
@@ -68,17 +66,12 @@ public:
               get_parameter("board_serial").as_string(), make_c_board_options(*this)}
         , command_component_(
               create_partner_component<CommandComponent>(get_component_name() + "_command", *this))
-        , oled_i2c_(
+        , oled_runtime_(
+              *this,
               [this](std::uint8_t slave_address, std::span<const std::byte> payload) {
                   write_i2c0(slave_address, payload);
               },
-              make_oled_i2c_address(*this))
-        , oled_(oled_i2c_.backend())
-        , oled_refresh_period_(make_oled_refresh_period(*this)) {
-        register_output("/demo/oled/update_count", update_count_, std::uint64_t{0});
-        register_output("/demo/oled/command_count", command_count_, std::uint64_t{0});
-        register_output("/demo/oled/initialized", initialized_output_, false);
-
+              make_oled_i2c_address(*this), make_oled_refresh_period(*this), get_logger()) {
         if (!has_parameter("skip_version_checks"))
             declare_parameter<bool>("skip_version_checks", false);
 
@@ -97,26 +90,30 @@ public:
 
     ~OledDemo() override = default;
 
-    void update() override { ++(*update_count_); }
+    void update() override {
+        oled_runtime_.update_status();
+        oled_runtime_.set_printf(
+            "OLED TEST\nupd=%04llu\ncmd=%04llu\ni2c=0x%02X\nerr=%s",
+            static_cast<unsigned long long>(oled_runtime_.update_count()),
+            static_cast<unsigned long long>(oled_runtime_.command_count()),
+            static_cast<unsigned int>(oled_runtime_.i2c_address()),
+            oled_runtime_.has_i2c_error() ? "yes" : "no");
+    }
 
     void command_update() {
-        ++(*command_count_);
+        auto packet_builder = start_transmit();
+        active_packet_builder_ = &packet_builder;
 
-        if (oled_refresh_countdown_ > 0) {
-            --oled_refresh_countdown_;
-            *initialized_output_ = initialized_;
-            return;
-        }
+        struct PacketBuilderGuard {
+            OledDemo& demo;
 
-        oled_refresh_countdown_ = oled_refresh_period_;
-        initialized_ = render_test_screen_batched()
-                    && !i2c_error_seen_.load(std::memory_order_acquire);
-        *initialized_output_ = initialized_;
+            ~PacketBuilderGuard() { demo.active_packet_builder_ = nullptr; }
+        } guard{*this};
+
+        oled_runtime_.command_update();
     }
 
 private:
-    using Font = device::Oled::FontSize;
-
     class CommandComponent : public rmcs_executor::Component {
     public:
         explicit CommandComponent(OledDemo& demo)
@@ -127,28 +124,6 @@ private:
     private:
         OledDemo& demo_;
     };
-
-    bool render_test_screen_batched() {
-        auto packet_builder = start_transmit();
-        active_packet_builder_ = &packet_builder;
-
-        struct PacketBuilderGuard {
-            OledDemo& demo;
-
-            ~PacketBuilderGuard() { demo.active_packet_builder_ = nullptr; }
-        } guard{*this};
-
-        return render_test_screen();
-    }
-
-    bool render_test_screen() {
-        const auto i2c_error = i2c_error_seen_.load(std::memory_order_acquire);
-        return oled_.display_printf(
-            Font::k6x8, "OLED TEST\nupd=%04llu\ncmd=%04llu\ni2c=0x%02X\nerr=%s",
-            static_cast<unsigned long long>(*update_count_),
-            static_cast<unsigned long long>(*command_count_),
-            static_cast<unsigned int>(oled_i2c_.i2c_address()), i2c_error ? "yes" : "no");
-    }
 
     void write_i2c0(std::uint8_t slave_address, std::span<const std::byte> payload) {
         if (payload.empty())
@@ -167,25 +142,12 @@ private:
     }
 
     void i2c0_error_callback(std::uint8_t slave_address) override {
-        i2c_error_seen_.store(true, std::memory_order_release);
-        RCLCPP_WARN(
-            get_logger(), "OLED I2C0 write failed for slave address 0x%02X.",
-            static_cast<unsigned int>(slave_address));
+        oled_runtime_.notify_i2c_error(slave_address);
     }
 
     std::shared_ptr<CommandComponent> command_component_;
-    device::OledI2c oled_i2c_;
-    device::Oled oled_;
-
-    std::atomic_bool i2c_error_seen_ = false;
-    bool initialized_ = false;
+    device::OledRuntime oled_runtime_;
     librmcs::agent::CBoard::PacketBuilder* active_packet_builder_ = nullptr;
-    unsigned int oled_refresh_period_ = 20;
-    unsigned int oled_refresh_countdown_ = 0;
-
-    OutputInterface<std::uint64_t> update_count_;
-    OutputInterface<std::uint64_t> command_count_;
-    OutputInterface<bool> initialized_output_;
 };
 
 } // namespace rmcs_core::hardware
