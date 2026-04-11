@@ -10,6 +10,3 @@ oled_demo_hardware:
     skip_version_checks: true
     oled_refresh_period: 20
     oled_i2c_address: 60
-    display_message: |
-      RMCS OLED Demo
-      Set /oled/text to override.

@@ -33,7 +33,6 @@ struct OledConfig {
     std::int16_t width = kSupportedWidth;
     std::int16_t height = kSupportedHeight;
 
-    std::uint8_t i2c_address = 0x3C;
     std::uint8_t display_offset = 0x00;
     std::uint8_t start_line = 0x00;
     std::uint8_t contrast = 0xCF;

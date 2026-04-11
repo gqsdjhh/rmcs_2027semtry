@@ -14,10 +14,12 @@ namespace rmcs_core::hardware::device {
 
 class OledI2c {
 public:
+    static constexpr std::uint8_t kDefaultI2cAddress = 0x3C;
+
     using TransferWriter = std::function<void(std::uint8_t, std::span<const std::byte>)>;
 
     explicit OledI2c(
-        TransferWriter writer = {}, std::uint8_t i2c_address = OledConfig{}.i2c_address) noexcept
+        TransferWriter writer = {}, std::uint8_t i2c_address = kDefaultI2cAddress) noexcept
         : writer_(std::move(writer))
         , i2c_address_(i2c_address) {}
 
@@ -33,7 +35,9 @@ public:
 
     [[nodiscard]] Oled::Backend backend() {
         return {
-            .write_command = [this](std::uint8_t command) { write_command(command); },
+            .write_commands = [this](std::span<const std::uint8_t> commands) {
+                write_commands(commands);
+            },
             .write_data = [this](std::span<const std::uint8_t> data) { write_data(data); },
         };
     }
@@ -43,9 +47,8 @@ private:
     static constexpr std::uint8_t kDataControl = 0x40;
     static constexpr std::size_t kMaxTransferSize = Oled::kWidth;
 
-    void write_command(std::uint8_t command) const {
-        const std::array<std::uint8_t, 1> payload{command};
-        write_transfer(kCommandControl, payload);
+    void write_commands(std::span<const std::uint8_t> commands) const {
+        write_transfer(kCommandControl, commands);
     }
 
     void write_data(std::span<const std::uint8_t> data) const {

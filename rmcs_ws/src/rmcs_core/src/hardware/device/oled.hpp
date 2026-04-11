@@ -6,7 +6,6 @@
 #include <cstdint>
 #include <cstdio>
 #include <functional>
-#include <rmcs_executor/component.hpp>
 #include <span>
 #include <string>
 #include <string_view>
@@ -26,25 +25,17 @@ public:
     static constexpr std::int16_t kHeight = OledShow::kHeight;
     static constexpr std::int16_t kPages = OledShow::kPages;
 
-    using CommandWriter = std::function<void(std::uint8_t)>;
+    using CommandWriter = std::function<void(std::span<const std::uint8_t>)>;
     using DataWriter = std::function<void(std::span<const std::uint8_t>)>;
 
     struct Backend {
-        CommandWriter write_command;
+        CommandWriter write_commands;
         DataWriter write_data;
     };
 
     explicit Oled(Backend backend = {}, OledConfig config = {})
         : backend_(std::move(backend))
         , config_(config) {}
-
-    explicit Oled(
-        rmcs_executor::Component& command_component, const std::string& name_prefix = "/oled",
-        Backend backend = {}, OledConfig config = {})
-        : backend_(std::move(backend))
-        , config_(config) {
-        command_component.register_input(name_prefix + "/text", text_input_, false);
-    }
 
     void configure(Backend backend) { backend_ = std::move(backend); }
     void configure(const OledConfig& config) { config_ = config; }
@@ -60,7 +51,7 @@ public:
     [[nodiscard]] const OledConfig& config() const { return config_; }
 
     bool has_backend() const {
-        return static_cast<bool>(backend_.write_command) && static_cast<bool>(backend_.write_data);
+        return static_cast<bool>(backend_.write_commands) && static_cast<bool>(backend_.write_data);
     }
 
     bool initialize() {
@@ -69,8 +60,8 @@ public:
             || !config_.uses_supported_transport_mode())
             return false;
 
-        for (auto command : build_init_sequence())
-            write_command(command);
+        const auto init_sequence = build_init_sequence();
+        write_commands(init_sequence);
 
         return flush();
     }
@@ -230,12 +221,6 @@ public:
         return display_at_text(x, y, format_to_string_view(buffer, format, args), font_size);
     }
 
-    bool update_command(FontSize font_size = FontSize::k6x8) {
-        if (!text_input_.ready())
-            return true;
-        return display_text(*text_input_, font_size);
-    }
-
 protected:
     void on_framebuffer_mutated() override { text_cache_valid_ = false; }
 
@@ -315,14 +300,17 @@ private:
     }
 
     void set_cursor(std::uint8_t page, std::uint8_t x) {
-        write_command(static_cast<std::uint8_t>(0xB0U | page));
-        write_command(static_cast<std::uint8_t>(0x10U | ((x & 0xF0U) >> 4)));
-        write_command(static_cast<std::uint8_t>(0x00U | (x & 0x0FU)));
+        const std::array<std::uint8_t, 3> cursor_commands{
+            static_cast<std::uint8_t>(0xB0U | page),
+            static_cast<std::uint8_t>(0x10U | ((x & 0xF0U) >> 4)),
+            static_cast<std::uint8_t>(0x00U | (x & 0x0FU)),
+        };
+        write_commands(cursor_commands);
     }
 
-    void write_command(std::uint8_t command) const {
-        if (backend_.write_command)
-            backend_.write_command(command);
+    void write_commands(std::span<const std::uint8_t> commands) const {
+        if (backend_.write_commands)
+            backend_.write_commands(commands);
     }
 
     void write_data(std::span<const std::uint8_t> data) const {
@@ -332,7 +320,6 @@ private:
 
     Backend backend_;
     OledConfig config_;
-    rmcs_executor::Component::InputInterface<std::string> text_input_;
     std::string displayed_text_;
     FontSize displayed_font_size_ = FontSize::k6x8;
     bool text_cache_valid_ = false;

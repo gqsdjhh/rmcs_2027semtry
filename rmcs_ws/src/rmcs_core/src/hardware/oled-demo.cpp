@@ -1,16 +1,15 @@
+#include <algorithm>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <span>
-#include <string>
-#include <string_view>
 
 #include <librmcs/agent/c_board.hpp>
+#include <rclcpp/logging.hpp>
 #include <rclcpp/node.hpp>
 #include <rclcpp/node_options.hpp>
 #include <rmcs_executor/component.hpp>
-#include <rmcs_utility/tick_timer.hpp>
 
 #include "hardware/device/oled.hpp"
 #include "hardware/device/oled_i2c.hpp"
@@ -18,6 +17,32 @@
 namespace rmcs_core::hardware {
 
 namespace {
+
+std::uint8_t make_oled_i2c_address(rclcpp::Node& node) {
+    if (!node.has_parameter("oled_i2c_address")) {
+        node.declare_parameter<int64_t>(
+            "oled_i2c_address", device::OledI2c::kDefaultI2cAddress);
+    }
+
+    const auto configured_i2c_address = node.get_parameter("oled_i2c_address").as_int();
+    if (configured_i2c_address < 0 || configured_i2c_address > 0x7F) {
+        RCLCPP_WARN(
+            node.get_logger(), "Invalid OLED I2C address %ld. Falling back to 0x%02X.",
+            configured_i2c_address,
+            static_cast<unsigned int>(device::OledI2c::kDefaultI2cAddress));
+        return device::OledI2c::kDefaultI2cAddress;
+    }
+
+    return static_cast<std::uint8_t>(configured_i2c_address);
+}
+
+unsigned int make_oled_refresh_period(rclcpp::Node& node) {
+    if (!node.has_parameter("oled_refresh_period"))
+        node.declare_parameter<int64_t>("oled_refresh_period", 20);
+
+    return static_cast<unsigned int>(
+        std::max<int64_t>(1, node.get_parameter("oled_refresh_period").as_int()));
+}
 
 librmcs::agent::AdvancedOptions make_c_board_options(rclcpp::Node& node) {
     librmcs::agent::AdvancedOptions options{};
@@ -43,27 +68,19 @@ public:
               get_parameter("board_serial").as_string(), make_c_board_options(*this)}
         , command_component_(
               create_partner_component<CommandComponent>(get_component_name() + "_command", *this))
-        , oled_i2c_([this](std::uint8_t slave_address, std::span<const std::byte> payload) {
-            write_i2c0(slave_address, payload);
-        })
-        , oled_(
-              *command_component_, "/oled",
-              oled_i2c_.backend()) {
+        , oled_i2c_(
+              [this](std::uint8_t slave_address, std::span<const std::byte> payload) {
+                  write_i2c0(slave_address, payload);
+              },
+              make_oled_i2c_address(*this))
+        , oled_(oled_i2c_.backend())
+        , oled_refresh_period_(make_oled_refresh_period(*this)) {
         register_output("/demo/oled/update_count", update_count_, std::uint64_t{0});
         register_output("/demo/oled/command_count", command_count_, std::uint64_t{0});
         register_output("/demo/oled/initialized", initialized_output_, false);
-        register_output("/demo/oled/scene_index", scene_index_output_, std::uint8_t{0});
 
-        if (!has_parameter("display_message"))
-            declare_parameter<std::string>("display_message", "RMCS OLED demo");
         if (!has_parameter("skip_version_checks"))
             declare_parameter<bool>("skip_version_checks", false);
-        if (!has_parameter("oled_i2c_address"))
-            declare_parameter<int64_t>("oled_i2c_address", device::OledConfig{}.i2c_address);
-        if (!has_parameter("oled_refresh_period"))
-            declare_parameter<int64_t>("oled_refresh_period", 20);
-        if (!has_parameter("scene_period"))
-            declare_parameter<int64_t>("scene_period", 150);
 
         if (get_parameter("skip_version_checks").as_bool()) {
             RCLCPP_WARN(
@@ -71,25 +88,6 @@ public:
                 "Skipping board firmware version checks for OledDemo. Use only for temporary "
                 "debugging.");
         }
-
-        auto oled_config = oled_.config();
-        const auto configured_i2c_address = get_parameter("oled_i2c_address").as_int();
-        if (configured_i2c_address < 0 || configured_i2c_address > 0x7F) {
-            RCLCPP_WARN(
-                get_logger(),
-                "Invalid OLED I2C address %ld. Falling back to 0x%02X.",
-                configured_i2c_address, static_cast<unsigned int>(oled_config.i2c_address));
-        } else {
-            oled_config.i2c_address = static_cast<std::uint8_t>(configured_i2c_address);
-        }
-        oled_i2c_.set_i2c_address(oled_config.i2c_address);
-        oled_.set_config(oled_config);
-
-        scene_period_ =
-            static_cast<unsigned int>(std::max<int64_t>(1, get_parameter("scene_period").as_int()));
-        scene_timer_.reset(scene_period_);
-        oled_refresh_period_ = static_cast<unsigned int>(
-            std::max<int64_t>(1, get_parameter("oled_refresh_period").as_int()));
     }
 
     OledDemo(const OledDemo&) = delete;
@@ -104,18 +102,6 @@ public:
     void command_update() {
         ++(*command_count_);
 
-        if (scene_timer_.tick()) {
-            current_scene_ =
-                static_cast<DemoScene>((static_cast<std::uint8_t>(current_scene_) + 1)
-                                       % static_cast<std::uint8_t>(DemoScene::kCount));
-            scene_tick_ = 0;
-            scene_entered_ = true;
-            scene_timer_.reset(scene_period_);
-        }
-
-        ++scene_tick_;
-        *scene_index_output_ = static_cast<std::uint8_t>(current_scene_);
-
         if (oled_refresh_countdown_ > 0) {
             --oled_refresh_countdown_;
             *initialized_output_ = initialized_;
@@ -123,24 +109,13 @@ public:
         }
 
         oled_refresh_countdown_ = oled_refresh_period_;
-        initialized_ =
-            render_scene_batched(current_scene_) && !i2c_error_seen_.load(std::memory_order_acquire);
+        initialized_ = render_test_screen_batched()
+                    && !i2c_error_seen_.load(std::memory_order_acquire);
         *initialized_output_ = initialized_;
-        scene_entered_ = false;
     }
 
 private:
     using Font = device::Oled::FontSize;
-
-    enum class DemoScene : std::uint8_t {
-        kDisplayText = 0,
-        kDisplayLineText,
-        kDisplayAtText,
-        kDisplayPrintf,
-        kDisplayLinePrintf,
-        kDisplayAtPrintf,
-        kCount,
-    };
 
     class CommandComponent : public rmcs_executor::Component {
     public:
@@ -153,20 +128,7 @@ private:
         OledDemo& demo_;
     };
 
-    bool render_scene(DemoScene scene) {
-        switch (scene) {
-        case DemoScene::kDisplayText: return render_display_text_scene();
-        case DemoScene::kDisplayLineText: return render_display_line_text_scene();
-        case DemoScene::kDisplayAtText: return render_display_at_text_scene();
-        case DemoScene::kDisplayPrintf: return render_display_printf_scene();
-        case DemoScene::kDisplayLinePrintf: return render_display_line_printf_scene();
-        case DemoScene::kDisplayAtPrintf: return render_display_at_printf_scene();
-        case DemoScene::kCount: return false;
-        }
-        return false;
-    }
-
-    bool render_scene_batched(DemoScene scene) {
+    bool render_test_screen_batched() {
         auto packet_builder = start_transmit();
         active_packet_builder_ = &packet_builder;
 
@@ -176,83 +138,16 @@ private:
             ~PacketBuilderGuard() { demo.active_packet_builder_ = nullptr; }
         } guard{*this};
 
-        return render_scene(scene);
+        return render_test_screen();
     }
 
-    bool render_display_text_scene() {
-        auto message = get_parameter("display_message").as_string();
-        if (message.size() > 16)
-            message.resize(16);
-
-        std::string content = "display_text\n";
-        content += message;
-        content += "\nwhole-screen\nstring_view";
-        return oled_.display_text(content, Font::k6x8);
-    }
-
-    bool render_display_line_text_scene() {
-        auto message = get_parameter("display_message").as_string();
-        if (message.size() > 12)
-            message.resize(12);
-
-        bool success = true;
-        success &= oled_.display_line_text(0, "display_line_text", Font::k6x8);
-        success &= oled_.display_line_text(2, "message:", Font::k6x8);
-        success &= oled_.display_line_text(3, message, Font::k6x8);
-        success &= oled_.display_line_text(
-            5, scene_tick_ % 2 == 0 ? "line update A" : "line update B", Font::k6x8);
-        success &= oled_.display_line_text(7, "per-line flush", Font::k6x8);
-        return success;
-    }
-
-    bool render_display_at_text_scene() {
-        bool success = true;
-        if (scene_entered_)
-            success &= oled_.display_text("", Font::k6x8);
-
-        success &= oled_.display_at_text(0, 0, "display_at_text", Font::k6x8);
-        success &= oled_.display_at_text(0, 16, "x=0,y=16", Font::k6x8);
-        success &= oled_.display_at_text(42, 32, "center", Font::k6x8);
-        success &= oled_.display_at_text(
-            0, 48, scene_tick_ % 2 == 0 ? "partial A" : "partial B", Font::k6x8);
-        return success;
-    }
-
-    bool render_display_printf_scene() {
+    bool render_test_screen() {
+        const auto i2c_error = i2c_error_seen_.load(std::memory_order_acquire);
         return oled_.display_printf(
-            Font::k6x8, "display_printf\nupd=%04llu\ncmd=%04llu\nratio=%+.2f\nptr=%p",
+            Font::k6x8, "OLED TEST\nupd=%04llu\ncmd=%04llu\ni2c=0x%02X\nerr=%s",
             static_cast<unsigned long long>(*update_count_),
             static_cast<unsigned long long>(*command_count_),
-            static_cast<double>((scene_tick_ % 40) - 20) / 3.0, static_cast<void*>(this));
-    }
-
-    bool render_display_line_printf_scene() {
-        bool success = true;
-        success &= oled_.display_line_printf(0, Font::k6x8, "display_line_printf");
-        success &= oled_.display_line_printf(
-            2, Font::k6x8, "upd=%04llu", static_cast<unsigned long long>(*update_count_));
-        success &= oled_.display_line_printf(
-            3, Font::k6x8, "cmd=%04llu", static_cast<unsigned long long>(*command_count_));
-        success &= oled_.display_line_printf(
-            5, Font::k6x8, "hex=0x%04X", static_cast<unsigned int>(*command_count_ & 0xFFFF));
-        success &= oled_.display_line_printf(
-            7, Font::k6x8, "tick=%03u", static_cast<unsigned int>(scene_tick_ % 1000));
-        return success;
-    }
-
-    bool render_display_at_printf_scene() {
-        bool success = true;
-        if (scene_entered_)
-            success &= oled_.display_text("", Font::k6x8);
-
-        success &= oled_.display_at_printf(0, 0, Font::k6x8, "display_at_printf");
-        success &= oled_.display_at_printf(0, 16, Font::k6x8, "x=%d", 0);
-        success &= oled_.display_at_printf(48, 16, Font::k6x8, "y=%d", 16);
-        success &= oled_.display_at_printf(
-            0, 32, Font::k6x8, "scene=%u", static_cast<unsigned int>(current_scene_));
-        success &= oled_.display_at_printf(
-            0, 48, Font::k6x8, "tick=%03u", static_cast<unsigned int>(scene_tick_ % 1000));
-        return success;
+            static_cast<unsigned int>(oled_i2c_.i2c_address()), i2c_error ? "yes" : "no");
     }
 
     void write_i2c0(std::uint8_t slave_address, std::span<const std::byte> payload) {
@@ -284,19 +179,13 @@ private:
 
     std::atomic_bool i2c_error_seen_ = false;
     bool initialized_ = false;
-    bool scene_entered_ = true;
     librmcs::agent::CBoard::PacketBuilder* active_packet_builder_ = nullptr;
     unsigned int oled_refresh_period_ = 20;
     unsigned int oled_refresh_countdown_ = 0;
-    unsigned int scene_period_ = 150;
-    std::uint64_t scene_tick_ = 0;
-    DemoScene current_scene_ = DemoScene::kDisplayText;
-    rmcs_utility::TickTimer scene_timer_;
 
     OutputInterface<std::uint64_t> update_count_;
     OutputInterface<std::uint64_t> command_count_;
     OutputInterface<bool> initialized_output_;
-    OutputInterface<std::uint8_t> scene_index_output_;
 };
 
 } // namespace rmcs_core::hardware
