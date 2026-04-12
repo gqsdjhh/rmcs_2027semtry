@@ -45,6 +45,12 @@ public:
 
     void set_text(std::string_view text) {
         const auto text_length = std::min(text.size(), pending_text_buffer_.size() - 1);
+        if (text_length == pending_text_length_
+            && std::equal(text.begin(), text.begin() + static_cast<std::ptrdiff_t>(text_length),
+                pending_text_buffer_.begin())) {
+            return;
+        }
+
         std::copy_n(text.data(), text_length, pending_text_buffer_.data());
         pending_text_buffer_[text_length] = '\0';
         pending_text_length_ = text_length;
@@ -58,6 +64,17 @@ public:
         va_end(args);
     }
 
+    void set_inverted_line(std::uint8_t line, bool inverted = true) {
+        if (line >= inverted_lines_.size())
+            return;
+
+        if (inverted_lines_[line] == inverted)
+            return;
+
+        inverted_lines_[line] = inverted;
+        text_dirty_ = true;
+    }
+
     void command_update() {
         ++(*command_count_);
 
@@ -69,7 +86,7 @@ public:
             }
 
             if (!frame_pending_) {
-                if (oled_refresh_countdown_ > 0) {
+                if (!text_dirty_ && oled_refresh_countdown_ > 0) {
                     --oled_refresh_countdown_;
                     return;
                 }
@@ -123,7 +140,7 @@ public:
     }
 
 private:
-    static constexpr Oled::FontSize kFont = Oled::FontSize::k6x8;
+    static constexpr Oled::FontSize kFont = Oled::FontSize::k8x16;
     static constexpr std::uint8_t kPagesPerCommandUpdate = 1;
 
     void handle_local_send_failure(const char* detail) {
@@ -162,10 +179,23 @@ private:
         oled_.clear();
         oled_.show_text(
             std::string_view{pending_text_buffer_.data(), pending_text_length_}, kFont);
+        apply_inverted_lines();
         frame_pending_ = true;
         next_page_to_flush_ = 0;
         text_dirty_ = false;
         return true;
+    }
+
+    void apply_inverted_lines() {
+        constexpr auto line_height = Oled::line_height(kFont);
+        for (std::size_t line = 0; line < inverted_lines_.size(); ++line) {
+            if (!inverted_lines_[line])
+                continue;
+
+            oled_.invert_area(
+                0, static_cast<std::int16_t>(line * line_height), static_cast<std::uint8_t>(Oled::kWidth),
+                line_height);
+        }
     }
 
     static constexpr std::size_t kTextBufferSize = 96;
@@ -181,6 +211,7 @@ private:
     unsigned int oled_refresh_period_ = 20;
     unsigned int oled_refresh_countdown_ = 0;
     std::uint8_t next_page_to_flush_ = 0;
+    std::array<bool, Oled::kPages> inverted_lines_{};
     std::array<char, kTextBufferSize> pending_text_buffer_{};
     std::size_t pending_text_length_ = 0;
 

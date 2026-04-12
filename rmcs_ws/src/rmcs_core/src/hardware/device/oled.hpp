@@ -84,6 +84,21 @@ public:
             page.fill(0x00);
     }
 
+    void invert_area(std::int16_t x, std::int16_t y, std::uint8_t width, std::uint8_t height) {
+        if (width == 0 || height == 0)
+            return;
+
+        on_framebuffer_mutated();
+        for (std::int16_t j = y; j < y + height; ++j) {
+            for (std::int16_t i = x; i < x + width; ++i) {
+                if (i < 0 || i >= kWidth || j < 0 || j >= kHeight)
+                    continue;
+
+                display_buffer_[j / 8][i] ^= static_cast<std::uint8_t>(0x01U << (j % 8));
+            }
+        }
+    }
+
     void show_char(std::int16_t x, std::int16_t y, char character, FontSize font_size) {
         if (character < ' ' || character > '~')
             character = '?';

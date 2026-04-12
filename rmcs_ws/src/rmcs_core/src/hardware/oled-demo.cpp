@@ -1,4 +1,3 @@
-#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -14,45 +13,6 @@
 
 namespace rmcs_core::hardware {
 
-namespace {
-
-std::uint8_t make_oled_i2c_address(rclcpp::Node& node) {
-    if (!node.has_parameter("oled_i2c_address")) {
-        node.declare_parameter<int64_t>(
-            "oled_i2c_address", device::OledRuntime::kDefaultI2cAddress);
-    }
-
-    const auto configured_i2c_address = node.get_parameter("oled_i2c_address").as_int();
-    if (configured_i2c_address < 0 || configured_i2c_address > 0x7F) {
-        RCLCPP_WARN(
-            node.get_logger(), "Invalid OLED I2C address %ld. Falling back to 0x%02X.",
-            configured_i2c_address,
-            static_cast<unsigned int>(device::OledRuntime::kDefaultI2cAddress));
-        return device::OledRuntime::kDefaultI2cAddress;
-    }
-
-    return static_cast<std::uint8_t>(configured_i2c_address);
-}
-
-unsigned int make_oled_refresh_period(rclcpp::Node& node) {
-    if (!node.has_parameter("oled_refresh_period"))
-        node.declare_parameter<int64_t>("oled_refresh_period", 20);
-
-    return static_cast<unsigned int>(
-        std::max<int64_t>(1, node.get_parameter("oled_refresh_period").as_int()));
-}
-
-librmcs::agent::AdvancedOptions make_c_board_options(rclcpp::Node& node) {
-    librmcs::agent::AdvancedOptions options{};
-    if (node.has_parameter("skip_version_checks")) {
-        options.dangerously_skip_version_checks =
-            node.get_parameter("skip_version_checks").as_bool();
-    }
-    return options;
-}
-
-} // namespace
-
 class OledDemo
     : public rmcs_executor::Component
     , public rclcpp::Node
@@ -63,7 +23,10 @@ public:
               get_component_name(),
               rclcpp::NodeOptions{}.automatically_declare_parameters_from_overrides(true))
         , librmcs::agent::CBoard{
-              get_parameter("board_serial").as_string(), make_c_board_options(*this)}
+              get_parameter("board_serial").as_string(),
+              librmcs::agent::AdvancedOptions{
+                  .dangerously_skip_version_checks =
+                      get_parameter("skip_version_checks").as_bool()}}
         , command_component_(
               create_partner_component<CommandComponent>(get_component_name() + "_command", *this))
         , oled_runtime_(
@@ -71,10 +34,9 @@ public:
               [this](std::uint8_t slave_address, std::span<const std::byte> payload) {
                   write_i2c0(slave_address, payload);
               },
-              make_oled_i2c_address(*this), make_oled_refresh_period(*this), get_logger()) {
-        if (!has_parameter("skip_version_checks"))
-            declare_parameter<bool>("skip_version_checks", false);
-
+              static_cast<std::uint8_t>(get_parameter("oled_i2c_address").as_int()),
+              static_cast<unsigned int>(get_parameter("oled_refresh_period").as_int()),
+              get_logger()) {
         if (get_parameter("skip_version_checks").as_bool()) {
             RCLCPP_WARN(
                 get_logger(),

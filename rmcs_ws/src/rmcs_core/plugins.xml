@@ -26,5 +26,8 @@
   <class type="rmcs_core::referee::command::interaction::Ui" base_class_type="rmcs_executor::Component" />
   <class type="rmcs_core::referee::app::ui::Infantry" base_class_type="rmcs_executor::Component" />
   <class type="rmcs_core::referee::app::ui::Hero" base_class_type="rmcs_executor::Component" />
-    <class type="rmcs_core::hardware::OledDemo" base_class_type="rmcs_executor::Component" />
+  <class type="rmcs_core::input::ButtonGesture" base_class_type="rmcs_executor::Component" />
+  <class type="rmcs_core::oled_menu::OledMenu" base_class_type="rmcs_executor::Component" />
+  <class type="rmcs_core::hardware::OledDemo" base_class_type="rmcs_executor::Component" />
+  <class type="rmcs_core::hardware::OledMenuDemo" base_class_type="rmcs_executor::Component" />
 </library>
