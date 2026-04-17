@@ -42,7 +42,8 @@ public:
               },
               static_cast<std::uint8_t>(get_parameter("oled_i2c_address").as_int()),
               static_cast<unsigned int>(get_parameter("oled_refresh_period").as_int()),
-              get_logger())
+              get_logger(),
+              "/demo/oled")
         , button_gpio_channel_(static_cast<std::uint8_t>(get_parameter("button_gpio_channel").as_int()))
         , button_read_period_ms_(
               static_cast<std::uint16_t>(get_parameter("button_read_period_ms").as_int()))
@@ -76,7 +77,7 @@ public:
         oled_runtime_.set_text(text);
         oled_runtime_.set_inverted_line(0, false);
 
-        for (std::uint8_t line = 1; line < static_cast<std::uint8_t>(device::Oled::kPages); ++line)
+        for (std::uint8_t line = 1; line < device::OledRuntime::kVisibleTextLineCount; ++line)
             oled_runtime_.set_inverted_line(line, line == inverted_line);
     }
 

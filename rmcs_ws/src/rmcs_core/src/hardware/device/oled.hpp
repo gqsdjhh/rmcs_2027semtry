@@ -188,6 +188,10 @@ protected:
     }
 
     void clear_area(std::int16_t x, std::int16_t y, std::uint8_t width, std::uint8_t height) {
+        if (width == 0 || height == 0)
+            return;
+
+        on_framebuffer_mutated();
         for (std::int16_t j = y; j < y + height; ++j) {
             for (std::int16_t i = x; i < x + width; ++i) {
                 if (i < 0 || i >= kWidth || j < 0 || j >= kHeight)

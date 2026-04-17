@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <string>
@@ -55,55 +56,76 @@ public:
     }
 
     void update() override {
-        if (*menu_enabled_ && *click_) {
-            cursor_index_ =
-                cursor_index_ >= kMenuItemCount ? 0 : (cursor_index_ + 1) % kMenuItemCount;
-        }
+        if (*menu_enabled_ && *click_ && !invoke_selected_action(&MenuItemDefinition::on_click))
+            advance_cursor();
 
-        if (*menu_enabled_ && *long_press_ && cursor_index_ == kTestItemIndex)
-            ++test_value_;
+        if (*menu_enabled_ && *long_press_)
+            invoke_selected_action(&MenuItemDefinition::on_long_press);
 
         render_menu_page();
     }
 
 private:
+    using ValueTextBuilder = std::string (OledMenu::*)() const;
+    using ItemAction = void (OledMenu::*)();
+
+    struct MenuItemDefinition {
+        const char* label;
+        ValueTextBuilder value_text_builder;
+        ItemAction on_click;
+        ItemAction on_long_press;
+    };
+
     static constexpr std::size_t kMenuItemCount = 5;
     static constexpr std::size_t kVisibleItemCount = 3;
-    static constexpr std::size_t kTestItemIndex = 4;
 
     void render_menu_page() {
+        *test_value_output_ = test_value_;
+
         if (!*menu_enabled_) {
             *text_output_ = "MODE MENU\nDISABLED";
             *inverted_line_output_ = 0;
             return;
         }
 
-        const auto items = build_menu_items();
         update_window_start();
 
         std::string text = "MODE MENU";
         const auto visible_end = std::min(kMenuItemCount, window_start_ + kVisibleItemCount);
         for (std::size_t index = window_start_; index < visible_end; ++index) {
             text += '\n';
-            text += items[index];
+            text += build_menu_item_text(index);
         }
 
         *text_output_ = std::move(text);
-        *test_value_output_ = test_value_;
         *inverted_line_output_ =
             cursor_index_ < kMenuItemCount
                 ? static_cast<std::uint8_t>(cursor_index_ - window_start_ + 1)
                 : static_cast<std::uint8_t>(0);
     }
 
-    [[nodiscard]] std::array<std::string, kMenuItemCount> build_menu_items() const {
-        return {
-            std::string{"CHAS:"} + display_text(*chassis_mode_),
-            std::string{"GMBL:"} + display_text(*gimbal_mode_),
-            std::string{"SHOT:"} + display_text(*shoot_mode_),
-            std::string{"FRIC:"} + display_text(*friction_enabled_),
-            std::string{"TEST:"} + std::to_string(test_value_),
-        };
+    [[nodiscard]] std::string build_menu_item_text(std::size_t index) const {
+        const auto& item = kMenuItems[index];
+        std::string text{item.label};
+        text += ':';
+        text += (this->*item.value_text_builder)();
+        return text;
+    }
+
+    void advance_cursor() {
+        cursor_index_ = cursor_index_ >= kMenuItemCount ? 0 : (cursor_index_ + 1) % kMenuItemCount;
+    }
+
+    bool invoke_selected_action(ItemAction MenuItemDefinition::*action_member) {
+        if (cursor_index_ >= kMenuItemCount)
+            return false;
+
+        const auto action = kMenuItems[cursor_index_].*action_member;
+        if (action == nullptr)
+            return false;
+
+        (this->*action)();
+        return true;
     }
 
     void update_window_start() {
@@ -155,6 +177,34 @@ private:
     }
 
     static const char* display_text(bool enabled) { return enabled ? "ON" : "OFF"; }
+
+    [[nodiscard]] std::string chassis_mode_value_text() const {
+        return display_text(*chassis_mode_);
+    }
+
+    [[nodiscard]] std::string gimbal_mode_value_text() const {
+        return display_text(*gimbal_mode_);
+    }
+
+    [[nodiscard]] std::string shoot_mode_value_text() const {
+        return display_text(*shoot_mode_);
+    }
+
+    [[nodiscard]] std::string friction_enabled_value_text() const {
+        return display_text(*friction_enabled_);
+    }
+
+    [[nodiscard]] std::string test_value_text() const { return std::to_string(test_value_); }
+
+    void increment_test_value() { ++test_value_; }
+
+    static inline constexpr std::array<MenuItemDefinition, kMenuItemCount> kMenuItems{{
+        {"CHAS", &OledMenu::chassis_mode_value_text, nullptr, nullptr},
+        {"GMBL", &OledMenu::gimbal_mode_value_text, nullptr, nullptr},
+        {"SHOT", &OledMenu::shoot_mode_value_text, nullptr, nullptr},
+        {"FRIC", &OledMenu::friction_enabled_value_text, nullptr, nullptr},
+        {"TEST", &OledMenu::test_value_text, nullptr, &OledMenu::increment_test_value},
+    }};
 
     const std::string button_prefix_;
     std::int64_t test_value_;

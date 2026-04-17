@@ -36,7 +36,8 @@ public:
               },
               static_cast<std::uint8_t>(get_parameter("oled_i2c_address").as_int()),
               static_cast<unsigned int>(get_parameter("oled_refresh_period").as_int()),
-              get_logger()) {
+              get_logger(),
+              "/demo/oled") {
         if (get_parameter("skip_version_checks").as_bool()) {
             RCLCPP_WARN(
                 get_logger(),

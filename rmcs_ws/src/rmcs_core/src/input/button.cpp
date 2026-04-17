@@ -37,6 +37,8 @@ public:
 
     void update() override {
         const auto now = *timestamp_;
+        const bool double_click_enabled =
+            double_click_gap_duration_ > std::chrono::milliseconds::zero();
         reset_pulses();
 
         if (!initialized_) {
@@ -56,7 +58,7 @@ public:
             last_raw_change_time_ = now;
         }
 
-        if (waiting_single_click_ && !stable_pressed_
+        if (double_click_enabled && waiting_single_click_ && !stable_pressed_
             && now - last_release_time_ >= double_click_gap_duration_) {
             *click_ = true;
             waiting_single_click_ = false;
@@ -75,6 +77,9 @@ public:
                 *long_pressing_ = false;
 
                 if (long_press_emitted_) {
+                    waiting_single_click_ = false;
+                } else if (!double_click_enabled) {
+                    *click_ = true;
                     waiting_single_click_ = false;
                 } else if (waiting_single_click_
                            && now - last_release_time_ < double_click_gap_duration_) {
