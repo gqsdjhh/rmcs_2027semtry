@@ -59,7 +59,7 @@ public:
 
         auto switch_right = *switch_right_;
         auto switch_left  = *switch_left_;
-        auto keyboard   = *keyboard_;
+        auto keyboard     = *keyboard_;
 
         do {
             if ((switch_left == Switch::UNKNOWN || switch_right == Switch::UNKNOWN)
